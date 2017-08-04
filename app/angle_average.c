@@ -4,7 +4,7 @@
 // Fox explanation of algorithm please see Example section at
 // https://en.wikipedia.org/wiki/Mean_of_circular_quantities
 
-#define ANGLE_ARRAY_SIZE 60
+#define ANGLE_ARRAY_SIZE 20
 float angleArray[ANGLE_ARRAY_SIZE];
 
 // Next free position

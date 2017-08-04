@@ -8,6 +8,10 @@
 
     300s / 5s = 60 vzorků
     60s / 5s = 12 vzorků
+
+    vzorkování 15 sekund
+    (5min)300s / 15s = 20 vzorků
+
 */
 
 
@@ -21,24 +25,23 @@ typedef enum
 bc_led_t led;
 bc_module_sigfox_t sigfox_module;
 
-// Button instance
-bc_button_t button;
-
-
-float batteryVoltage = 0;
 float windSpeedAverage = 0;
+float windSpeedMaximum = 0;
 float windAngleAverage = 0;
+float batteryVoltage = 0;
 
+#define MAIN_TASK_PERIOD_SECONDS 15
 #define SIGFOX_TRANSMIT_PERIOD_MINUTES 5
-#define WIND_DATA_STREAM_SAMPLES 60
+#define WIND_DATA_STREAM_SAMPLES 20
 
-//BC_DATA_STREAM_FLOAT_BUFFER(stream_buffer_wind_direction, WIND_DATA_STREAM_SAMPLES)
-//bc_data_stream_t stream_wind_direction;
-
+// Data stream for wind speed averaging
 BC_DATA_STREAM_FLOAT_BUFFER(stream_buffer_wind_speed, WIND_DATA_STREAM_SAMPLES)
 bc_data_stream_t stream_wind_speed;
 
 // Wind voltage table
+// This was measured with original resistor in wind direction sensor and internal MCU pullup
+// Some values are too close to each other. Better solution will be to use external 4k7 hardware pullup
+// and edit this table to the real ADC values.
 float windVoltageTable[16] = {
     1.463, // 0° North
     0.469, // 22.5°
@@ -58,9 +61,9 @@ float windVoltageTable[16] = {
     1.152  // 337.5°
 };
 
+// Last angle and speed for debug
 float windAngle;
-
-
+float windSpeed;
 
 void adc_event_handler(bc_adc_channel_t channel, bc_adc_event_t event, void *param);
 
@@ -74,23 +77,31 @@ void sigfox_transmit_task(void *param)
         return;
     }
 
-    bc_led_set_mode(&led, BC_LED_MODE_ON);
+    //bc_led_set_mode(&led, BC_LED_MODE_ON);
+    bc_led_pulse(&led, 500);
 
-    uint16_t speed = (uint16_t)windSpeedAverage;
+    uint16_t speed = (uint16_t)(windSpeedAverage * 10.0f);
+    uint16_t speedMaximum = (uint16_t)(windSpeedMaximum * 10.0f);
     uint16_t angle = (uint16_t)windAngleAverage;
     uint16_t battery = (uint16_t)(batteryVoltage * 1000);
 
-    uint8_t buffer[6];
+    uint8_t i = 0;
+    uint8_t buffer[8];
 
-    buffer[0] = speed & 0xFF;
-    buffer[1] = (speed >> 8) & 0xFF;
-    buffer[2] = angle & 0xFF;
-    buffer[3] = (angle >> 8) & 0xFF;
-    buffer[4] = battery & 0xFF;
-    buffer[5] = (battery >> 8) & 0xFF;
+    buffer[i++] = speed & 0xFF;
+    buffer[i++] = (speed >> 8) & 0xFF;
+    buffer[i++] = speedMaximum & 0xFF;
+    buffer[i++] = (speedMaximum >> 8) & 0xFF;
+    buffer[i++] = angle & 0xFF;
+    buffer[i++] = (angle >> 8) & 0xFF;
+    buffer[i++] = battery & 0xFF;
+    buffer[i++] = (battery >> 8) & 0xFF;
 
     bc_module_sigfox_send_rf_frame(&sigfox_module, buffer, sizeof(buffer));
     bc_scheduler_plan_current_relative(1000 * 60 * SIGFOX_TRANSMIT_PERIOD_MINUTES);
+
+    // Reset the maximum wind speed
+    windSpeedMaximum = 0;
 }
 
 
@@ -108,42 +119,6 @@ void sigfox_module_event_handler(bc_module_sigfox_t *self, bc_module_sigfox_even
     else if (event == BC_MODULE_SIGFOX_EVENT_SEND_RF_FRAME_DONE)
     {
         bc_led_set_mode(&led, BC_LED_MODE_OFF);
-    }
-}
-
-void button_event_handler(bc_button_t *self, bc_button_event_t event, void *event_param)
-{
-    (void) self;
-    (void) event_param;
-
-    if (event == BC_BUTTON_EVENT_PRESS)
-    {
-       //bc_scheduler_register(transmit_motion_task, NULL, 0);
-    }
-    else if (event == BC_BUTTON_EVENT_HOLD)
-    {
-
-    }
-}
-
-
-unsigned int channel_a_overflow_count = 0;
-unsigned int channel_b_overflow_count = 0;
-
-void pulse_counter_event_handler(bc_module_sensor_channel_t channel, bc_pulse_counter_event_t event, void *event_param)
-{
-    (void) event_param;
-
-    if (event == BC_PULSE_COUNTER_EVENT_OVERFLOW)
-    {
-        if (channel == BC_MODULE_SENSOR_CHANNEL_A)
-        {
-            channel_a_overflow_count++;
-        }
-        else
-        {
-            channel_b_overflow_count++;
-        }
     }
 }
 
@@ -180,12 +155,11 @@ void adc_event_handler(bc_adc_channel_t channel, bc_adc_event_t event, void *par
      {
          if(channel == BC_ADC_CHANNEL_A5)
          {
+            // Disable pullup
+            bc_module_sensor_set_pull(BC_MODULE_SENSOR_CHANNEL_B, BC_MODULE_SENSOR_PULL_NONE);
+
             bc_adc_get_result(BC_ADC_CHANNEL_A5, &windAdc);
             windAngle = windVoltageToAngle(windAdc);
-
-            // Add value to stream and get average
-            //bc_data_stream_feed(&stream_wind_direction, &windAngle);
-            //bc_data_stream_get_average(&stream_wind_direction, &windAngleAverage);
 
             angle_average_add(windAngle);
             windAngleAverage = angle_average_get();
@@ -217,19 +191,13 @@ void application_init(void)
 
     bc_led_init(&led, BC_GPIO_LED, false, false);
 
-    // Initialize button
-    bc_button_init(&button, BC_GPIO_BUTTON, BC_GPIO_PULL_DOWN, false);
-    bc_button_set_event_handler(&button, button_event_handler, NULL);
-
     // Pulse counter
     bc_pulse_counter_init(BC_MODULE_SENSOR_CHANNEL_A, BC_PULSE_COUNTER_EDGE_FALL);
-	bc_pulse_counter_set_event_handler(BC_MODULE_SENSOR_CHANNEL_A, pulse_counter_event_handler, NULL);
+	bc_pulse_counter_set_event_handler(BC_MODULE_SENSOR_CHANNEL_A, NULL, NULL);
 
     bc_module_sensor_set_mode(BC_MODULE_SENSOR_CHANNEL_B, BC_MODULE_SENSOR_MODE_INPUT);
-    bc_module_sensor_set_pull(BC_MODULE_SENSOR_CHANNEL_B, BC_MODULE_SENSOR_PULL_UP_INTERNAL);
-
-    //bc_module_battery_init(BC_MODULE_BATTERY_FORMAT_STANDARD);
-    //bc_module_battery_set_update_interval(5130);
+    // Pullup is enabled in the task just before measuring
+    //bc_module_sensor_set_pull(BC_MODULE_SENSOR_CHANNEL_B, BC_MODULE_SENSOR_PULL_UP_INTERNAL);
 
     // Initialize ADC channel - wind direction
     bc_adc_init(BC_ADC_CHANNEL_A5, BC_ADC_FORMAT_FLOAT);
@@ -249,25 +217,33 @@ void application_init(void)
     bc_module_sigfox_set_event_handler(&sigfox_module, sigfox_module_event_handler, NULL);
     bc_scheduler_register(sigfox_transmit_task, NULL, 0);
 
+    // Do a single blink to signalize that module is working
     bc_led_pulse(&led, 1000);
-
 }
 
 
 
 void application_task()
 {
-
+    // Enable pullup during wind direction measurement
+    bc_module_sensor_set_pull(BC_MODULE_SENSOR_CHANNEL_B, BC_MODULE_SENSOR_PULL_UP_INTERNAL);
     bc_adc_async_read(BC_ADC_CHANNEL_A5);
 
     float counter = (float)bc_pulse_counter_get(BC_MODULE_SENSOR_CHANNEL_A);
     bc_pulse_counter_reset(BC_MODULE_SENSOR_CHANNEL_A);
 
-    float windSpeedMeters = (counter / 5.0f) * 0.66666f; // 2.4km/h ~ 0.66666m/s
+    // Get current wind speed, one pulse per second ~ 2.4kmph
+    windSpeed = (counter / ((float)MAIN_TASK_PERIOD_SECONDS)) * 0.66666f; // 2.4km/h ~ 0.66666m/s
+
+    // Save maximum wind speed value
+    if(windSpeed > windSpeedMaximum)
+    {
+        windSpeedMaximum = windSpeed;
+    }
 
     // Add value to stream and get average
-    bc_data_stream_feed(&stream_wind_speed, &windSpeedMeters);
+    bc_data_stream_feed(&stream_wind_speed, &windSpeed);
     bc_data_stream_get_average(&stream_wind_speed, &windSpeedAverage);
 
-    bc_scheduler_plan_current_relative(5000);
+    bc_scheduler_plan_current_relative(MAIN_TASK_PERIOD_SECONDS * 1000);
 }
