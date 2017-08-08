@@ -12,6 +12,8 @@
     vzorkování 15 sekund
     (5min)300s / 15s = 20 vzorků
 
+    (10min)600s / 15s = 40 vzorků
+
 */
 
 
@@ -24,6 +26,8 @@ typedef enum
 
 bc_led_t led;
 bc_module_sigfox_t sigfox_module;
+bc_tag_temperature_t temperature_tag_internal;
+
 
 float windSpeedAverage = 0;
 float windSpeedMaximum = 0;
@@ -31,8 +35,8 @@ float windAngleAverage = 0;
 float batteryVoltage = 0;
 
 #define MAIN_TASK_PERIOD_SECONDS 15
-#define SIGFOX_TRANSMIT_PERIOD_MINUTES 5
-#define WIND_DATA_STREAM_SAMPLES 20
+#define SIGFOX_TRANSMIT_PERIOD_MINUTES 10
+#define WIND_DATA_STREAM_SAMPLES 40
 
 // Data stream for wind speed averaging
 BC_DATA_STREAM_FLOAT_BUFFER(stream_buffer_wind_speed, WIND_DATA_STREAM_SAMPLES)
@@ -191,6 +195,10 @@ void application_init(void)
 
     bc_led_init(&led, BC_GPIO_LED, false, false);
 
+    // Init internal temperature sensor to lower power sonsumption
+    bc_tag_temperature_init(&temperature_tag_internal, BC_I2C_I2C0, BC_TAG_TEMPERATURE_I2C_ADDRESS_ALTERNATE);
+    bc_tag_temperature_set_update_interval(&temperature_tag_internal, 5000 * 1000); // set big interval
+
     // Pulse counter
     bc_pulse_counter_init(BC_MODULE_SENSOR_CHANNEL_A, BC_PULSE_COUNTER_EDGE_FALL);
 	bc_pulse_counter_set_event_handler(BC_MODULE_SENSOR_CHANNEL_A, NULL, NULL);
@@ -215,7 +223,8 @@ void application_init(void)
     // Sigfox
     bc_module_sigfox_init(&sigfox_module, BC_MODULE_SIGFOX_REVISION_R2);
     bc_module_sigfox_set_event_handler(&sigfox_module, sigfox_module_event_handler, NULL);
-    bc_scheduler_register(sigfox_transmit_task, NULL, 0);
+    bc_scheduler_task_id_t sigfox_task_id = bc_scheduler_register(sigfox_transmit_task, NULL, 0);
+    bc_scheduler_plan_relative(sigfox_task_id, 20 * 1000); // Schedule sending 20 seconds after start
 
     // Do a single blink to signalize that module is working
     bc_led_pulse(&led, 1000);
